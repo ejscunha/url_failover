@@ -23,6 +23,7 @@ defmodule UrlFailover.MixProject do
   defp deps do
     [
       {:bypass, "~> 2.1", only: :test},
+      {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.1", only: [:dev, :test], runtime: false}
     ]
   end
