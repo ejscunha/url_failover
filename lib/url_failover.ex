@@ -8,9 +8,37 @@ defmodule UrlFailover do
   @check_interval Application.compile_env(:url_failover, :check_interval, :timer.seconds(30))
   @check_timeout Application.compile_env(:url_failover, :check_timeout, :timer.seconds(10))
 
+  @type option :: {:name, GenServer.name()} | {:urls, [String.t()]}
+  @type options :: [option()]
+
+  @doc """
+  Starts a GenServer that will periodically check a given list of URLs if they are
+  healthy. A name can be given to the started GenServer, if none given it will
+  default to UrlFailover.
+  """
+  @spec start_link(options) :: GenServer.on_start()
   def start_link(opts) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc """
+  Returns an ok tuple with a random healthy URL.
+
+  iex> UrlFailover.get_url()
+  {:ok, "https://elixir-lang.org"}
+
+  iex> UrlFailover.get_url(MyUrlFailover)
+  {:ok, "https://elixir-lang.org"}
+
+  If there are not healthy URLs available it returns {:error, :no_healthy_url}.
+
+  iex> UrlFailover.get_url()
+  {:error, :no_healthy_url}
+  """
+  @spec get_url(GenServer.name()) :: {:ok, String.t()} | {:error, :no_healthy_url}
+  def get_url(server \\ __MODULE__) do
+    GenServer.call(server, :get_url)
   end
 
   @impl true
@@ -43,10 +71,21 @@ defmodule UrlFailover do
       )
       |> Enum.reduce([], fn
         {:ok, {:healthy, url}}, acc -> [url | acc]
-        _, acc -> IO.inspect(acc)
+        _, acc -> acc
       end)
 
     {:noreply, Map.put(state, :healthy_urls, healthy_urls)}
+  end
+
+  @impl true
+  def handle_call(:get_url, _from, %{healthy_urls: healthy_urls} = state) do
+    res =
+      case healthy_urls do
+        [] -> {:error, :no_healthy_url}
+        _ -> {:ok, Enum.random(healthy_urls)}
+      end
+
+    {:reply, res, state}
   end
 
   defp valid_list_if_urls?(urls) do
@@ -54,7 +93,6 @@ defmodule UrlFailover do
   end
 
   defp valid_url?(url) when is_binary(url), do: url |> URI.parse() |> valid_uri?()
-  defp valid_url?(url) when is_struct(url, URI), do: valid_uri?(url)
   defp valid_url?(_url), do: false
 
   defp valid_uri?(%URI{

@@ -146,4 +146,36 @@ defmodule UrlFailoverTest do
       assert %{healthy_urls: []} = :sys.get_state(pid)
     end
   end
+
+  describe "get_url/1" do
+    test "returns a random healthy URL", %{test: test} do
+      bypass = Bypass.open()
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "GET", "/path1", fn conn ->
+        send(test_pid, :checked)
+        Conn.resp(conn, 200, "")
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/path2", fn conn ->
+        send(test_pid, :checked)
+        Conn.resp(conn, 200, "")
+      end)
+
+      urls = ["http://localhost:#{bypass.port}/path1", "http://localhost:#{bypass.port}/path2"]
+
+      start_supervised!({UrlFailover, urls: urls, name: test})
+
+      assert_receive :checked
+      assert_receive :checked
+
+      assert {:ok, url} = UrlFailover.get_url(test)
+      assert url in urls
+    end
+
+    test "returns {:error, :no_healthy_url} if there are no healthy URLs", %{test: test} do
+      start_supervised!({UrlFailover, urls: [], name: test})
+      assert {:error, :no_healthy_url} = UrlFailover.get_url(test)
+    end
+  end
 end
