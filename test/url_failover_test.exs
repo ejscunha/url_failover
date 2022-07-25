@@ -1,5 +1,6 @@
 defmodule UrlFailoverTest do
   use ExUnit.Case
+  alias Plug.Conn
 
   describe "start_link/1" do
     test "defaults process name to UrlFailover" do
@@ -51,6 +52,98 @@ defmodule UrlFailoverTest do
 
       assert {:ok, pid} = start_supervised({UrlFailover, urls: urls, name: test})
       assert is_pid(pid)
+    end
+  end
+
+  describe "URL health check" do
+    setup do
+      bypass = Bypass.open()
+      [bypass: bypass]
+    end
+
+    test "checks given URLs health check at start", %{test: test, bypass: bypass} do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "GET", "/path", fn conn ->
+        send(test_pid, :checked)
+        Conn.resp(conn, 200, "")
+      end)
+
+      url = "http://localhost:#{bypass.port}/path"
+
+      start_supervised!({UrlFailover, urls: [url], name: test})
+
+      assert_receive :checked
+    end
+
+    test "checks given URLs health check periodically", %{test: test, bypass: bypass} do
+      test_pid = self()
+      interval = Application.get_env(:url_failover, :check_interval)
+
+      Bypass.expect(bypass, "GET", "/path", fn conn ->
+        send(test_pid, :checked)
+        Conn.resp(conn, 200, "")
+      end)
+
+      url = "http://localhost:#{bypass.port}/path"
+
+      start_supervised!({UrlFailover, urls: [url], name: test})
+
+      assert_receive :checked
+      assert_receive :checked, interval + 10
+    end
+
+    test "marks healthy URLs with healthy check", %{test: test, bypass: bypass} do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "GET", "/path", fn conn ->
+        send(test_pid, :checked)
+        Conn.resp(conn, 200, "")
+      end)
+
+      url = "http://localhost:#{bypass.port}/path"
+
+      pid = start_supervised!({UrlFailover, urls: [url], name: test})
+
+      assert_receive :checked
+
+      assert %{healthy_urls: [^url]} = :sys.get_state(pid)
+    end
+
+    test "does not mark unhealthy URLs with healthy check", %{test: test, bypass: bypass} do
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "GET", "/path", fn conn ->
+        send(test_pid, :checked)
+        Conn.resp(conn, 500, "")
+      end)
+
+      url = "http://localhost:#{bypass.port}/path"
+
+      pid = start_supervised!({UrlFailover, urls: [url], name: test})
+
+      assert_receive :checked
+
+      assert %{healthy_urls: []} = :sys.get_state(pid)
+    end
+
+    test "checks that fail due to timeout are considered unhealthy", %{test: test, bypass: bypass} do
+      test_pid = self()
+      timeout = Application.get_env(:url_failover, :check_timeout)
+
+      Bypass.expect_once(bypass, "GET", "/path", fn conn ->
+        Process.sleep(timeout + 10)
+        send(test_pid, :checked)
+        Conn.resp(conn, 200, "")
+      end)
+
+      url = "http://localhost:#{bypass.port}/path"
+
+      pid = start_supervised!({UrlFailover, urls: [url], name: test})
+
+      assert_receive :checked, timeout + 20
+
+      assert %{healthy_urls: []} = :sys.get_state(pid)
     end
   end
 end

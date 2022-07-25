@@ -6,6 +6,7 @@ defmodule UrlFailover do
   use GenServer
 
   @check_interval Application.compile_env(:url_failover, :check_interval, :timer.seconds(30))
+  @check_timeout Application.compile_env(:url_failover, :check_timeout, :timer.seconds(10))
 
   def start_link(opts) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -16,10 +17,12 @@ defmodule UrlFailover do
   def init(opts) do
     with {:ok, urls} when is_list(urls) <- Keyword.fetch(opts, :urls),
          true <- valid_list_if_urls?(urls) do
+      Process.flag(:trap_exit, true)
+
       send(self(), :check)
       :timer.send_interval(@check_interval, :check)
 
-      {:ok, %{check_urls: urls}}
+      {:ok, %{check_urls: urls, healthy_urls: []}}
     else
       :error ->
         {:stop, :no_urls_provided}
@@ -30,8 +33,20 @@ defmodule UrlFailover do
   end
 
   @impl true
-  def handle_info(:check, %{check_urls: _check_urls} = state) do
-    {:noreply, state}
+  def handle_info(:check, %{check_urls: check_urls} = state) do
+    healthy_urls =
+      check_urls
+      |> Task.async_stream(&check_url/1,
+        ordered: false,
+        timeout: @check_timeout,
+        on_timeout: :kill_task
+      )
+      |> Enum.reduce([], fn
+        {:ok, {:healthy, url}}, acc -> [url | acc]
+        _, acc -> IO.inspect(acc)
+      end)
+
+    {:noreply, Map.put(state, :healthy_urls, healthy_urls)}
   end
 
   defp valid_list_if_urls?(urls) do
@@ -51,4 +66,13 @@ defmodule UrlFailover do
        do: true
 
   defp valid_uri?(_uri), do: false
+
+  defp check_url(url) do
+    charlist_url = to_charlist(url)
+
+    case :httpc.request(charlist_url) do
+      {:ok, {{_, status, _}, _, _}} when status in 200..499 -> {:healthy, url}
+      _ -> {:not_healthy, url}
+    end
+  end
 end
