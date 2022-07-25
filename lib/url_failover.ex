@@ -1,6 +1,11 @@
 defmodule UrlFailover do
   @moduledoc """
-  Documentation for `UrlFailover`.
+  This is a simple library to periodically check if HTTP servers are healthy,
+  given a list of URLs. Periodically (defaults to 30 seconds), makes an HTTP
+  GET request (concurrently) to each URL in the list, if it returns an HTTP
+  status code in the range of 200 and 499 and within a given time (defaults
+  to 10 seconds), the URL is considered healthy. If there is a change in health
+  status of an URL, a message is sent to all subscribers to act accordingly.
   """
 
   use GenServer
