@@ -41,6 +41,26 @@ defmodule UrlFailover do
     GenServer.call(server, :get_url)
   end
 
+  @doc """
+  Subscribes the calling process to receive updates regarding changes to the health
+  of the tracked URLs. Whenever a URL health changes status a message will be sent
+  to all subscribers with the following format
+  {:url_health, :healthy, "http://elixir-lang.org"}.
+  """
+  @spec subscribe(GenServer.name()) :: :ok
+  def subscribe(server \\ __MODULE__) do
+    GenServer.cast(server, {:subscribe, self()})
+  end
+
+  @doc """
+  Unsubscribes the calling process from receive updates regarding changes to the health
+  of the tracked URLs.
+  """
+  @spec unsubscribe(GenServer.name()) :: :ok
+  def unsubscribe(server \\ __MODULE__) do
+    GenServer.cast(server, {:unsubscribe, self()})
+  end
+
   @impl true
   def init(opts) do
     with {:ok, urls} when is_list(urls) <- Keyword.fetch(opts, :urls),
@@ -50,7 +70,7 @@ defmodule UrlFailover do
       send(self(), :check)
       :timer.send_interval(@check_interval, :check)
 
-      {:ok, %{check_urls: urls, healthy_urls: []}}
+      {:ok, %{check_urls: urls, healthy_urls: MapSet.new(), subscribers: MapSet.new()}}
     else
       :error ->
         {:stop, :no_urls_provided}
@@ -69,23 +89,52 @@ defmodule UrlFailover do
         timeout: @check_timeout,
         on_timeout: :kill_task
       )
-      |> Enum.reduce([], fn
-        {:ok, {:healthy, url}}, acc -> [url | acc]
-        _, acc -> acc
-      end)
+      |> process_check_results(state)
+      |> MapSet.new()
 
     {:noreply, Map.put(state, :healthy_urls, healthy_urls)}
+  end
+
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{subscribers: subscribers} = state) do
+    subscribers = MapSet.delete(subscribers, pid)
+    {:noreply, Map.put(state, :subscribers, subscribers)}
   end
 
   @impl true
   def handle_call(:get_url, _from, %{healthy_urls: healthy_urls} = state) do
     res =
-      case healthy_urls do
-        [] -> {:error, :no_healthy_url}
-        _ -> {:ok, Enum.random(healthy_urls)}
+      if Enum.empty?(healthy_urls) do
+        {:error, :no_healthy_url}
+      else
+        {:ok, healthy_urls |> MapSet.to_list() |> Enum.random()}
       end
 
     {:reply, res, state}
+  end
+
+  @impl true
+  def handle_cast({:subscribe, pid}, %{subscribers: subscribers} = state) do
+    ref = Process.monitor(pid)
+    subscribers = MapSet.put(subscribers, {pid, ref})
+    {:noreply, Map.put(state, :subscribers, subscribers)}
+  end
+
+  def handle_cast({:unsubscribe, pid}, %{subscribers: subscribers} = state) do
+    pid_ref =
+      Enum.find(subscribers, fn
+        {^pid, _ref} -> true
+        _ -> false
+      end)
+
+    subscribers =
+      if is_nil(pid_ref) do
+        subscribers
+      else
+        pid_ref |> elem(1) |> Process.demonitor()
+        MapSet.delete(subscribers, pid_ref)
+      end
+
+    {:noreply, Map.put(state, :subscribers, subscribers)}
   end
 
   defp valid_list_if_urls?(urls) do
@@ -113,4 +162,34 @@ defmodule UrlFailover do
       _ -> {:not_healthy, url}
     end
   end
+
+  defp process_check_results(check_results, %{
+         healthy_urls: existing_healthy_urls,
+         subscribers: subscribers
+       }) do
+    Enum.reduce(check_results, [], fn
+      {:ok, {:healthy, url}}, acc ->
+        unless MapSet.member?(existing_healthy_urls, url) do
+          notify_subscribers(subscribers, url, :healthy)
+        end
+
+        [url | acc]
+
+      {:ok, {:not_healthy, url}}, acc ->
+        if MapSet.member?(existing_healthy_urls, url) do
+          notify_subscribers(subscribers, url, :not_healthy)
+        end
+
+        acc
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp notify_subscribers(subscribers, url, status),
+    do:
+      Enum.each(subscribers, fn {pid, _ref} ->
+        send(pid, {:url_health, status, url})
+      end)
 end

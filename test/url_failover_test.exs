@@ -107,7 +107,8 @@ defmodule UrlFailoverTest do
 
       assert_receive :checked
 
-      assert %{healthy_urls: [^url]} = :sys.get_state(pid)
+      %{healthy_urls: healthy_urls} = :sys.get_state(pid)
+      assert MapSet.member?(healthy_urls, url)
     end
 
     test "does not mark unhealthy URLs with healthy check", %{test: test, bypass: bypass} do
@@ -124,7 +125,8 @@ defmodule UrlFailoverTest do
 
       assert_receive :checked
 
-      assert %{healthy_urls: []} = :sys.get_state(pid)
+      %{healthy_urls: healthy_urls} = :sys.get_state(pid)
+      assert Enum.empty?(healthy_urls)
     end
 
     test "checks that fail due to timeout are considered unhealthy", %{test: test, bypass: bypass} do
@@ -141,9 +143,10 @@ defmodule UrlFailoverTest do
 
       pid = start_supervised!({UrlFailover, urls: [url], name: test})
 
-      assert_receive :checked, timeout + 20
+      assert_receive :checked, timeout + 50
 
-      assert %{healthy_urls: []} = :sys.get_state(pid)
+      %{healthy_urls: healthy_urls} = :sys.get_state(pid)
+      assert Enum.empty?(healthy_urls)
     end
   end
 
@@ -176,6 +179,65 @@ defmodule UrlFailoverTest do
     test "returns {:error, :no_healthy_url} if there are no healthy URLs", %{test: test} do
       start_supervised!({UrlFailover, urls: [], name: test})
       assert {:error, :no_healthy_url} = UrlFailover.get_url(test)
+    end
+  end
+
+  describe "subscribe/1" do
+    test "subscribes to receive URL health status changes", %{test: test} do
+      bypass = Bypass.open()
+      counter = :counters.new(1, [])
+
+      Bypass.expect(bypass, "GET", "/path", fn conn ->
+        count = :counters.get(counter, 1)
+        :counters.add(counter, 1, 1)
+
+        if rem(count, 2) == 0 do
+          Conn.resp(conn, 500, "")
+        else
+          Conn.resp(conn, 200, "")
+        end
+      end)
+
+      url = "http://localhost:#{bypass.port}/path"
+
+      start_supervised!({UrlFailover, urls: [url], name: test})
+      assert :ok = UrlFailover.subscribe(test)
+
+      assert_receive {:url_health, :healthy, ^url}, 200
+      assert_receive {:url_health, :not_healthy, ^url}, 200
+    end
+  end
+
+  describe "unsubscribe/1" do
+    test "unsubscribes from receiving URL health status changes", %{test: test} do
+      bypass = Bypass.open()
+      counter = :counters.new(1, [])
+      test_pid = self()
+
+      Bypass.expect(bypass, "GET", "/path", fn conn ->
+        count = :counters.get(counter, 1)
+        :counters.add(counter, 1, 1)
+        send(test_pid, :checked)
+
+        if rem(count, 2) == 0 do
+          Conn.resp(conn, 500, "")
+        else
+          Conn.resp(conn, 200, "")
+        end
+      end)
+
+      url = "http://localhost:#{bypass.port}/path"
+
+      start_supervised!({UrlFailover, urls: [url], name: test})
+      assert :ok = UrlFailover.subscribe(test)
+
+      assert_receive :checked
+      assert_receive {:url_health, :healthy, ^url}, 200
+
+      assert :ok = UrlFailover.unsubscribe(test)
+
+      assert_receive :checked
+      refute_receive {:url_health, :not_healthy, ^url}, 200
     end
   end
 end
